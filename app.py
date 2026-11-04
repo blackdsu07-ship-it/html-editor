@@ -222,7 +222,7 @@ with st.container(key="toolbar"):
     with tb[1].popover("📱 View", width="stretch"):
         device = st.radio("Device", ["Desktop", "Tablet (768)", "Mobile (375)", "Custom"])
         custom_w = st.number_input("Custom width", 200, 1920, 600) if device == "Custom" else None
-        height = st.slider("Height", 300, 1400, 700, 50)
+        height = st.slider("Preview height", 300, 2000, 900, 50)
         no_img = st.checkbox("Images off")
         dark = st.checkbox("Dark mode (rough sim)")
 
@@ -261,8 +261,13 @@ with st.container(key="toolbar"):
                 st.query_params["h"] = enc
                 st.success("Copy the URL from the address bar")
 
+    layout = tb[5].radio("Layout", ["Split", "Wide preview", "Preview only"], index=1,
+                         horizontal=True, label_visibility="collapsed")
+
 # ---------- main ----------
-left, right = st.columns(2)
+left, right = st.columns({"Split": [1, 1], "Wide preview": [2, 3], "Preview only": [0.02, 1]}[layout])
+if layout == "Preview only":
+    st.markdown("<style>.st-key-panel_l{display:none}</style>", unsafe_allow_html=True)
 
 with left, st.container(key="panel_l"):
     st.subheader("Editor")
