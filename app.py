@@ -152,6 +152,43 @@ def link_status(u):
         return str(getattr(e, "code", e))
 
 
+# ---------- tool selector ----------
+tool = st.sidebar.radio("Tool", ["HTML Viewer", "rDNS Generator"])
+
+if tool == "rDNS Generator":
+    st.title("rDNS Generator")
+    ss.setdefault("rdns_out", "")
+    ss.setdefault("rdns_bad", [])
+    with st.form("rdns_form"):
+        ips_txt = st.text_area("IPs (one per line)", height=200)
+        domain = st.text_input("Domain", placeholder="steepbev.com")
+        prefix = st.text_input("Subdomain prefix", placeholder="info")
+        go = st.form_submit_button("Generate")
+    if go:
+        domain = domain.strip().lower().strip(".")
+        prefix = prefix.strip().lower()
+        lines, bad, seen = [], [], set()
+        for tok in re.split(r"[\s,;]+", ips_txt.strip()):
+            if not tok:
+                continue
+            parts = tok.split(".")
+            if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                if tok not in seen:
+                    seen.add(tok)
+                    lines.append(f"{tok} {prefix}{parts[3]}.{domain}")
+            else:
+                bad.append(tok)
+        ss.rdns_out = "\n".join(lines) if domain else ""
+        ss.rdns_bad = bad
+        if not domain:
+            st.error("Enter a domain")
+    if ss.rdns_out:
+        st.code(ss.rdns_out, language=None)
+        st.download_button("Download .txt", ss.rdns_out, "rdns.txt", "text/plain")
+    if ss.rdns_bad:
+        st.warning("Invalid IPs skipped: " + ", ".join(ss.rdns_bad))
+    st.stop()
+
 # ---------- sidebar ----------
 with st.sidebar:
     st.header("Load")
