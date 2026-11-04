@@ -168,7 +168,6 @@ TOOLS = {
     "rDNS Generator": tools.rdns_generator,
     "rDNS / FCrDNS Checker": tools.rdns_checker,
     "SPF / DKIM / DMARC": tools.dns_auth,
-    "Blacklist Checker": tools.blacklist,
     "PowerMTA Config": tools.pmta,
 }
 tool = st.sidebar.radio("Tool", ["HTML Viewer", *TOOLS])
