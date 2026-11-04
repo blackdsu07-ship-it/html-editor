@@ -8,6 +8,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import tools
+import style
 
 try:
     from streamlit_ace import st_ace
@@ -15,7 +16,8 @@ try:
 except ImportError:
     HAS_ACE = False
 
-st.set_page_config(page_title="HTML Online Viewer", layout="wide")
+st.set_page_config(page_title="HTML Online Viewer", page_icon="⚡", layout="wide")
+style.apply()
 
 SAMPLE = """<!DOCTYPE html>
 <html>
@@ -174,6 +176,9 @@ tool = st.sidebar.radio("Tool", ["HTML Viewer", *TOOLS])
 if tool in TOOLS:
     TOOLS[tool]()
     st.stop()
+
+st.title("HTML Online Viewer")
+st.caption("Live preview · email checks · find & replace")
 
 # ---------- sidebar ----------
 with st.sidebar:
