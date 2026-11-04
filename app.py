@@ -1,9 +1,13 @@
 import re
+import json
+import difflib
 import html as htmlmod
 from urllib.request import Request, urlopen
 
 import streamlit as st
 import streamlit.components.v1 as components
+
+import tools
 
 try:
     from streamlit_ace import st_ace
@@ -38,6 +42,13 @@ ss = st.session_state
 ss.setdefault("html", SAMPLE)
 ss.setdefault("ver", 0)
 ss.setdefault("last_upload", None)
+ss.setdefault("tpls", {})
+if "h" in st.query_params and not ss.get("share_loaded"):
+    try:
+        ss.html = tools.decode_share(st.query_params["h"])
+    except Exception:
+        pass
+    ss.share_loaded = True
 
 
 # ---------- helpers ----------
@@ -153,40 +164,16 @@ def link_status(u):
 
 
 # ---------- tool selector ----------
-tool = st.sidebar.radio("Tool", ["HTML Viewer", "rDNS Generator"])
-
-if tool == "rDNS Generator":
-    st.title("rDNS Generator")
-    ss.setdefault("rdns_out", "")
-    ss.setdefault("rdns_bad", [])
-    with st.form("rdns_form"):
-        ips_txt = st.text_area("IPs (one per line)", height=200)
-        domain = st.text_input("Domain", placeholder="steepbev.com")
-        prefix = st.text_input("Subdomain prefix", placeholder="info")
-        go = st.form_submit_button("Generate")
-    if go:
-        domain = domain.strip().lower().strip(".")
-        prefix = prefix.strip().lower()
-        lines, bad, seen = [], [], set()
-        for tok in re.split(r"[\s,;]+", ips_txt.strip()):
-            if not tok:
-                continue
-            parts = tok.split(".")
-            if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-                if tok not in seen:
-                    seen.add(tok)
-                    lines.append(f"{tok} {prefix}{parts[3]}.{domain}")
-            else:
-                bad.append(tok)
-        ss.rdns_out = "\n".join(lines) if domain else ""
-        ss.rdns_bad = bad
-        if not domain:
-            st.error("Enter a domain")
-    if ss.rdns_out:
-        st.code(ss.rdns_out, language=None)
-        st.download_button("Download .txt", ss.rdns_out, "rdns.txt", "text/plain")
-    if ss.rdns_bad:
-        st.warning("Invalid IPs skipped: " + ", ".join(ss.rdns_bad))
+TOOLS = {
+    "rDNS Generator": tools.rdns_generator,
+    "rDNS / FCrDNS Checker": tools.rdns_checker,
+    "SPF / DKIM / DMARC": tools.dns_auth,
+    "Blacklist Checker": tools.blacklist,
+    "PowerMTA Config": tools.pmta,
+}
+tool = st.sidebar.radio("Tool", ["HTML Viewer", *TOOLS])
+if tool in TOOLS:
+    TOOLS[tool]()
     st.stop()
 
 # ---------- sidebar ----------
@@ -224,6 +211,39 @@ with st.sidebar:
     st.header("Merge data")
     merge_txt = st.text_area("key=value per line", "name=John\nemail=john@example.com", height=100)
 
+    with st.expander("Templates (this session)"):
+        nm = st.text_input("Name", key="tpl_name")
+        if st.button("Save current") and nm:
+            ss.tpls[nm] = ss.html
+        if ss.tpls:
+            pick = st.selectbox("Saved", list(ss.tpls))
+            t1, t2 = st.columns(2)
+            if t1.button("Load"):
+                ss.html = ss.tpls[pick]
+                ss.ver += 1
+                st.rerun()
+            if t2.button("Delete"):
+                ss.tpls.pop(pick)
+                st.rerun()
+            st.download_button("Export all (JSON)", json.dumps(ss.tpls), "templates.json")
+        imp = st.file_uploader("Import JSON", type="json", key="tpl_imp")
+        if imp is not None and ss.get("tpl_imp_id") != f"{imp.name}-{imp.size}":
+            try:
+                ss.tpls.update(json.loads(imp.getvalue()))
+                ss.tpl_imp_id = f"{imp.name}-{imp.size}"
+                st.rerun()
+            except Exception as e:
+                st.error(f"Bad file: {e}")
+
+    with st.expander("Share link"):
+        if st.button("Generate link"):
+            enc = tools.encode_share(ss.html)
+            if len(enc) > 7000:
+                st.error("Too large for a URL")
+            else:
+                st.query_params["h"] = enc
+                st.success("Copy the URL from the address bar")
+
 # ---------- main ----------
 left, right = st.columns(2)
 
@@ -247,6 +267,13 @@ with left:
             except re.error as e:
                 st.error(f"Bad regex: {e}")
 
+    with st.expander("Add tracking params to links"):
+        tp = st.text_input("Params", "utm_source=email&utm_medium=bulk&utm_campaign=test")
+        if st.button("Apply to all http(s) links"):
+            ss.html = tools.track_links(ss.html, tp)
+            ss.ver += 1
+            st.rerun()
+
     if HAS_ACE:
         new = st_ace(value=ss.html, language="html", theme="monokai", height=650,
                      wrap=True, auto_update=True, key=f"ace_{ss.ver}")
@@ -269,7 +296,8 @@ if dark:
     shown = dark_sim(shown)
 
 with right:
-    t_prev, t_lint, t_links, t_text = st.tabs(["Preview", "Lint", "Links", "Plain text"])
+    t_prev, t_lint, t_links, t_text, t_spam, t_diff = st.tabs(
+        ["Preview", "Lint", "Links", "Plain text", "Spam / ratio", "Diff"])
 
     with t_prev:
         width = {"Desktop": None, "Tablet (768)": 768, "Mobile (375)": 375}.get(device, custom_w)
@@ -292,3 +320,34 @@ with right:
 
     with t_text:
         st.text_area("Plain text version", to_text(merged), height=500)
+
+    with t_spam:
+        sp = tools.spam_report(merged)
+        m = st.columns(4)
+        m[0].metric("Text chars", sp["chars"])
+        m[1].metric("Images", sp["images"])
+        m[2].metric("Links", sp["links"])
+        m[3].metric("ALL-CAPS words", sp["caps"])
+        if sp["images"] and sp["chars"] < 200 * sp["images"]:
+            st.warning(f"Low text-to-image ratio: {sp['chars']} chars / {sp['images']} images (aim for 200+ per image)")
+        else:
+            st.success("Text-to-image ratio OK")
+        if sp["excl"] > 3:
+            st.warning(f"{sp['excl']} exclamation marks")
+        if sp["hits"]:
+            st.warning("Spam trigger words found")
+            st.dataframe([{"word": k, "count": v} for k, v in sp["hits"].items()])
+        else:
+            st.success("No spam trigger words found")
+
+    with t_diff:
+        if st.button("Save current as baseline"):
+            ss.base = ss.html
+        src = st.selectbox("Compare against", ["Baseline snapshot", *ss.tpls])
+        base = ss.get("base") if src == "Baseline snapshot" else ss.tpls.get(src)
+        if base is None:
+            st.info("Save a baseline first")
+        else:
+            page = difflib.HtmlDiff(wrapcolumn=60).make_file(
+                base.splitlines(), ss.html.splitlines(), "Baseline", "Current", context=True, numlines=2)
+            components.html(page, height=600, scrolling=True)
