@@ -155,13 +155,24 @@ DNSBL = ["zen.spamhaus.org", "b.barracudacentral.org", "bl.spamcop.net", "dnsbl.
          "psbl.surriel.com", "dnsbl-1.uceprotect.net", "bl.mailspike.net"]
 
 
-def dnsbl(ip, zone):
-    a = q(".".join(reversed(ip.split("."))) + "." + zone, "A")
-    if not a:
+SPAMHAUS = {"127.0.0.2": "SBL", "127.0.0.3": "CSS", "127.0.0.4": "XBL", "127.0.0.7": "XBL",
+            "127.0.0.9": "SBL DROP", "127.0.0.10": "PBL", "127.0.0.11": "PBL"}
+
+
+def dnsbl(ip, zone, key=""):
+    host = ".".join(reversed(ip.split(".")))
+    z = f"{key}.zen.dq.spamhaus.net" if key and zone == "zen.spamhaus.org" else zone
+    try:
+        a = [x.to_text() for x in R.resolve(f"{host}.{z}", "A")]
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
         return "ok"
-    if a[0].startswith("127.255.255."):
+    except Exception:
+        return "error"
+    if any(x.startswith("127.255.255.") for x in a):
         return "blocked"
-    return "LISTED" if a[0].startswith("127.") else "?"
+    if zone == "zen.spamhaus.org":
+        return "LISTED " + "/".join(dict.fromkeys(SPAMHAUS.get(x, x) for x in a))
+    return "LISTED"
 
 
 def blacklist():
@@ -169,6 +180,7 @@ def blacklist():
     with st.form("bl"):
         ips_txt = st.text_area("IPs", height=140)
         zones = st.multiselect("DNSBLs", DNSBL, DNSBL)
+        key = st.text_input("Spamhaus DQS key (optional, fixes 'blocked'/'error')", type="password")
         go = st.form_submit_button("Check")
     if go:
         ips, bad = expand(ips_txt)
@@ -177,16 +189,17 @@ def blacklist():
             ips = ips[:50]
         jobs = [(i, z) for i in ips for z in zones]
         with ThreadPoolExecutor(30) as ex:
-            res = list(ex.map(lambda j: dnsbl(*j), jobs))
+            res = list(ex.map(lambda j: dnsbl(*j, key.strip()), jobs))
         table = {i: {"ip": i} for i in ips}
         for (i, z), r in zip(jobs, res):
             table[i][z] = r
         rows = list(table.values())
         for r in rows:
-            r["listed"] = sum(v == "LISTED" for k, v in r.items() if k not in ("ip", "listed"))
+            r["listed"] = sum(v.startswith("LISTED") for k, v in r.items() if k not in ("ip", "listed"))
         st.dataframe(rows, use_container_width=True)
-        if any(r in ("blocked", "?") for r in res):
-            st.caption("'blocked' = the DNSBL refused this resolver (common with Spamhaus on shared/cloud DNS); result is unknown.")
+        if "blocked" in res or "error" in res:
+            st.warning("Some results are UNKNOWN, not clean: 'blocked' = DNSBL refused this resolver, 'error' = lookup "
+                       "failed/timed out. Spamhaus blocks shared/cloud DNS; use a free Spamhaus DQS key above.")
 
 
 def dns_auth():
