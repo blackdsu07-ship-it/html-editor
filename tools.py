@@ -148,7 +148,7 @@ def rdns_checker():
         if rows:
             ok = sum(r["FCrDNS"] == "PASS" for r in rows)
             st.metric("FCrDNS pass", f"{ok}/{len(rows)}")
-            st.dataframe(rows, use_container_width=True)
+            st.dataframe(rows, width="stretch")
 
 
 def dns_auth():
@@ -195,7 +195,7 @@ def dns_auth():
                 m = re.search(r"p=([A-Za-z0-9+/=]+)", t)
                 found.append({"selector": s, "key": "present" if m else "revoked/empty", "record": t[:80] + "..."})
         if found:
-            st.dataframe(found, use_container_width=True)
+            st.dataframe(found, width="stretch")
         else:
             st.warning("DKIM: no record found for the given selectors")
 
