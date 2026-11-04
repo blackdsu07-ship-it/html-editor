@@ -16,7 +16,8 @@ try:
 except ImportError:
     HAS_ACE = False
 
-st.set_page_config(page_title="HTML Online Viewer", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="HTML Online Viewer", page_icon="⚡", layout="wide",
+                   initial_sidebar_state="collapsed")
 style.apply()
 
 SAMPLE = """<!DOCTYPE html>
@@ -54,6 +55,14 @@ if "h" in st.query_params and not ss.get("share_loaded"):
 
 
 # ---------- helpers ----------
+def show_html(h, width, height):
+    if hasattr(st, "iframe"):
+        st.iframe(h, width=width or "stretch", height=height)
+    else:
+        components.html(h, width=width, height=height, scrolling=True)
+
+
+
 def parse_data(txt):
     d = {}
     for line in txt.splitlines():
@@ -165,68 +174,72 @@ def link_status(u):
         return str(getattr(e, "code", e))
 
 
-# ---------- tool selector ----------
-TOOLS = {
-    "rDNS Generator": tools.rdns_generator,
-    "rDNS / FCrDNS Checker": tools.rdns_checker,
-    "SPF / DKIM / DMARC": tools.dns_auth,
-    "PowerMTA Config": tools.pmta,
+# ---------- header + top nav ----------
+st.markdown(
+    '<div class="hero"><div class="logo">⚡</div><div><div class="brand">HTML Online Viewer</div>'
+    '<div class="tag">preview · email checks · deliverability tools</div></div></div>',
+    unsafe_allow_html=True)
+
+NAV = {
+    "🖥️ Viewer": None,
+    "🌐 rDNS Generator": tools.rdns_generator,
+    "🔍 FCrDNS Check": tools.rdns_checker,
+    "🛡️ SPF · DKIM · DMARC": tools.dns_auth,
+    "🚀 PowerMTA": tools.pmta,
 }
-tool = st.sidebar.radio("Tool", ["HTML Viewer", *TOOLS])
-if tool in TOOLS:
-    TOOLS[tool]()
+with st.container(key="nav"):
+    tool = st.radio("Tool", list(NAV), horizontal=True, label_visibility="collapsed")
+if NAV[tool]:
+    NAV[tool]()
     st.stop()
 
-st.title("HTML Online Viewer")
-st.caption("Live preview · email checks · find & replace")
+# ---------- toolbar ----------
+with st.container(key="toolbar"):
+    tb = st.columns([1, 1, 1, 1.2, 1, 3])
 
-# ---------- sidebar ----------
-with st.sidebar:
-    st.header("Load")
-    up = st.file_uploader("Upload HTML", type=["html", "htm", "txt"])
-    if up is not None:
-        uid = f"{up.name}-{up.size}"
-        if ss.last_upload != uid:
-            ss.html = up.getvalue().decode("utf-8", errors="replace")
-            ss.last_upload = uid
+    with tb[0].popover("📂 Load", width="stretch"):
+        up = st.file_uploader("Upload HTML", type=["html", "htm", "txt"])
+        if up is not None:
+            uid = f"{up.name}-{up.size}"
+            if ss.last_upload != uid:
+                ss.html = up.getvalue().decode("utf-8", errors="replace")
+                ss.last_upload = uid
+                ss.ver += 1
+                st.rerun()
+        url = st.text_input("Load from URL")
+        if st.button("Fetch URL", width="stretch") and url:
+            try:
+                ss.html = fetch_url(url)
+                ss.ver += 1
+                st.rerun()
+            except Exception as e:
+                st.error(f"Fetch failed: {e}")
+        if st.button("Load sample", width="stretch"):
+            ss.html = SAMPLE
             ss.ver += 1
             st.rerun()
-    url = st.text_input("Load from URL")
-    c1, c2 = st.columns(2)
-    if c1.button("Fetch", use_container_width=True) and url:
-        try:
-            ss.html = fetch_url(url)
-            ss.ver += 1
-            st.rerun()
-        except Exception as e:
-            st.error(f"Fetch failed: {e}")
-    if c2.button("Sample", use_container_width=True):
-        ss.html = SAMPLE
-        ss.ver += 1
-        st.rerun()
 
-    st.header("Preview")
-    device = st.radio("Device", ["Desktop", "Tablet (768)", "Mobile (375)", "Custom"])
-    custom_w = st.number_input("Custom width", 200, 1920, 600) if device == "Custom" else None
-    height = st.slider("Height", 300, 1400, 700, 50)
-    no_img = st.checkbox("Images off")
-    dark = st.checkbox("Dark mode (rough sim)")
+    with tb[1].popover("📱 View", width="stretch"):
+        device = st.radio("Device", ["Desktop", "Tablet (768)", "Mobile (375)", "Custom"])
+        custom_w = st.number_input("Custom width", 200, 1920, 600) if device == "Custom" else None
+        height = st.slider("Height", 300, 1400, 700, 50)
+        no_img = st.checkbox("Images off")
+        dark = st.checkbox("Dark mode (rough sim)")
 
-    st.header("Merge data")
-    merge_txt = st.text_area("key=value per line", "name=John\nemail=john@example.com", height=100)
+    with tb[2].popover("🧩 Merge", width="stretch"):
+        merge_txt = st.text_area("key=value per line", "name=John\nemail=john@example.com", height=120)
 
-    with st.expander("Templates (this session)"):
+    with tb[3].popover("💾 Templates", width="stretch"):
         nm = st.text_input("Name", key="tpl_name")
         if st.button("Save current") and nm:
             ss.tpls[nm] = ss.html
         if ss.tpls:
             pick = st.selectbox("Saved", list(ss.tpls))
-            t1, t2 = st.columns(2)
-            if t1.button("Load"):
+            if st.button("Load template"):
                 ss.html = ss.tpls[pick]
                 ss.ver += 1
                 st.rerun()
-            if t2.button("Delete"):
+            if st.button("Delete template"):
                 ss.tpls.pop(pick)
                 st.rerun()
             st.download_button("Export all (JSON)", json.dumps(ss.tpls), "templates.json")
@@ -239,7 +252,7 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Bad file: {e}")
 
-    with st.expander("Share link"):
+    with tb[4].popover("🔗 Share", width="stretch"):
         if st.button("Generate link"):
             enc = tools.encode_share(ss.html)
             if len(enc) > 7000:
@@ -251,7 +264,7 @@ with st.sidebar:
 # ---------- main ----------
 left, right = st.columns(2)
 
-with left:
+with left, st.container(key="panel_l"):
     st.subheader("Editor")
     with st.expander("Find & Replace"):
         f = st.text_input("Find", key="find")
@@ -287,8 +300,8 @@ with left:
         ss.html = new
 
     d1, d2 = st.columns(2)
-    d1.download_button("Download .html", ss.html, "page.html", "text/html", use_container_width=True)
-    if d2.button("Clear", use_container_width=True):
+    d1.download_button("Download .html", ss.html, "page.html", "text/html", width="stretch")
+    if d2.button("Clear", width="stretch"):
         ss.html = ""
         ss.ver += 1
         st.rerun()
@@ -299,13 +312,13 @@ shown = images_off(merged) if no_img else merged
 if dark:
     shown = dark_sim(shown)
 
-with right:
+with right, st.container(key="panel_r"):
     t_prev, t_lint, t_links, t_text, t_spam, t_diff = st.tabs(
         ["Preview", "Lint", "Links", "Plain text", "Spam / ratio", "Diff"])
 
     with t_prev:
         width = {"Desktop": None, "Tablet (768)": 768, "Mobile (375)": 375}.get(device, custom_w)
-        components.html(shown, width=width, height=height, scrolling=True)
+        show_html(shown, width, height)
 
     with t_lint:
         for lvl, msg in lint(ss.html, merged):
@@ -318,7 +331,7 @@ with right:
             if st.button("Check status"):
                 for row in rows:
                     row["status"] = link_status(row["url"]) if row["url"].startswith("http") else "-"
-            st.dataframe(rows, use_container_width=True)
+            st.dataframe(rows, width="stretch")
         else:
             st.info("No links found")
 
@@ -354,4 +367,4 @@ with right:
         else:
             page = difflib.HtmlDiff(wrapcolumn=60).make_file(
                 base.splitlines(), ss.html.splitlines(), "Baseline", "Current", context=True, numlines=2)
-            components.html(page, height=600, scrolling=True)
+            show_html(page, None, 600)
