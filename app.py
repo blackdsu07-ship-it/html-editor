@@ -9,6 +9,7 @@ import streamlit.components.v1 as components
 
 import tools
 import style
+import db
 
 try:
     from streamlit_ace import st_ace
@@ -230,27 +231,32 @@ with st.container(key="toolbar"):
         merge_txt = st.text_area("key=value per line", "name=John\nemail=john@example.com", height=120)
 
     with tb[3].popover("💾 Templates", width="stretch"):
-        nm = st.text_input("Name", key="tpl_name")
-        if st.button("Save current") and nm:
-            ss.tpls[nm] = ss.html
-        if ss.tpls:
-            pick = st.selectbox("Saved", list(ss.tpls))
-            if st.button("Load template"):
-                ss.html = ss.tpls[pick]
-                ss.ver += 1
-                st.rerun()
-            if st.button("Delete template"):
-                ss.tpls.pop(pick)
-                st.rerun()
-            st.download_button("Export all (JSON)", json.dumps(ss.tpls), "templates.json")
-        imp = st.file_uploader("Import JSON", type="json", key="tpl_imp")
-        if imp is not None and ss.get("tpl_imp_id") != f"{imp.name}-{imp.size}":
-            try:
-                ss.tpls.update(json.loads(imp.getvalue()))
+        st.caption("☁️ Saved in Neon database" if db.enabled()
+                   else "Session only. Add NEON_DATABASE_URL to secrets to save permanently.")
+        try:
+            nm = st.text_input("Name", key="tpl_name")
+            if st.button("Save current") and nm.strip():
+                db.save(nm.strip(), ss.html)
+                st.toast("Template saved")
+            saved = db.names()
+            if saved:
+                pick = st.selectbox("Saved", saved)
+                if st.button("Load template"):
+                    ss.html = db.load(pick) or ""
+                    ss.ver += 1
+                    st.rerun()
+                if st.button("Delete template"):
+                    db.remove(pick)
+                    st.rerun()
+                st.download_button("Export all (JSON)", json.dumps(db.export_all()), "templates.json")
+            imp = st.file_uploader("Import JSON", type="json", key="tpl_imp")
+            if imp is not None and ss.get("tpl_imp_id") != f"{imp.name}-{imp.size}":
+                for k, v in json.loads(imp.getvalue()).items():
+                    db.save(k, v)
                 ss.tpl_imp_id = f"{imp.name}-{imp.size}"
                 st.rerun()
-            except Exception as e:
-                st.error(f"Bad file: {e}")
+        except Exception as e:
+            st.error(f"Template storage error: {e}")
 
     with tb[4].popover("🔗 Share", width="stretch"):
         if st.button("Generate link"):
@@ -365,8 +371,12 @@ with right, st.container(key="panel_r"):
     with t_diff:
         if st.button("Save current as baseline"):
             ss.base = ss.html
-        src = st.selectbox("Compare against", ["Baseline snapshot", *ss.tpls])
-        base = ss.get("base") if src == "Baseline snapshot" else ss.tpls.get(src)
+        try:
+            tpl_names = db.names()
+        except Exception:
+            tpl_names = []
+        src = st.selectbox("Compare against", ["Baseline snapshot", *tpl_names])
+        base = ss.get("base") if src == "Baseline snapshot" else db.load(src)
         if base is None:
             st.info("Save a baseline first")
         else:
