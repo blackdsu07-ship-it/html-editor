@@ -226,6 +226,7 @@ with st.container(key="toolbar"):
         height = st.slider("Preview height", 300, 2000, 900, 50)
         no_img = st.checkbox("Images off")
         dark = st.checkbox("Dark mode (rough sim)")
+        http_imgs = st.checkbox("Load http:// images", True, help="Fetched through the server so they work on the https app")
 
     with tb[2].popover("🧩 Merge", width="stretch"):
         merge_txt = st.text_area("key=value per line", "name=John\nemail=john@example.com", height=120)
@@ -319,7 +320,7 @@ with left, st.container(key="panel_l"):
 
 data = parse_data(merge_txt)
 merged = apply_merge(ss.html, data)
-shown = images_off(merged) if no_img else merged
+shown = images_off(merged) if no_img else (tools.inline_http_images(merged) if http_imgs else merged)
 if dark:
     shown = dark_sim(shown)
 
