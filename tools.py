@@ -126,10 +126,10 @@ def rdns_generator():
 def check_ip(ip, helo):
     p = ptr(ip)
     fwd = [a for h in p for a in q(h, "A")]
-    row = {"ip": ip, "ptr": ", ".join(p) or "-", "A of PTR": ", ".join(dict.fromkeys(fwd)) or "-",
-           "FCrDNS": "PASS" if ip in fwd else "FAIL"}
+    row = {"IP": ip, "PTR": ", ".join(p) or "-", "A (fwd)": ", ".join(dict.fromkeys(fwd)) or "-",
+           "FCrDNS": "✅" if ip in fwd else "❌"}
     if helo:
-        row["HELO match"] = "PASS" if helo in p else "FAIL"
+        row["HELO"] = "✅" if helo in p else "❌"
     return row
 
 
@@ -139,16 +139,33 @@ def rdns_checker():
         ips_txt = st.text_area("IPs", height=160)
         helo = st.text_input("HELO/EHLO hostname (optional, compared to PTR)")
         go = st.form_submit_button("Check")
-    if go:
-        ips, bad = expand(ips_txt)
-        if bad:
-            st.warning("Skipped: " + ", ".join(bad))
-        with ThreadPoolExecutor(20) as ex:
-            rows = list(ex.map(lambda i: check_ip(i, helo.strip().lower()), ips))
-        if rows:
-            ok = sum(r["FCrDNS"] == "PASS" for r in rows)
-            st.metric("FCrDNS pass", f"{ok}/{len(rows)}")
-            st.dataframe(rows, width="stretch")
+    if not go:
+        return
+    ips, bad = expand(ips_txt)
+    if bad:
+        st.warning("Skipped: " + ", ".join(bad))
+    with ThreadPoolExecutor(20) as ex:
+        rows = list(ex.map(lambda i: check_ip(i, helo.strip().lower()), ips))
+    if not rows:
+        return
+    import pandas as pd
+    ok = sum(r["FCrDNS"] == "✅" for r in rows)
+    c1, c2 = st.columns(2)
+    c1.success(f"✅ {ok} pass")
+    c2.error(f"❌ {len(rows) - ok} fail") if len(rows) - ok else c2.success("❌ 0 fail")
+    good = "background-color:#06402B;color:#34D399;font-weight:700;text-align:center"
+    badc = "background-color:#4C0519;color:#FB7185;font-weight:700;text-align:center"
+    df = pd.DataFrame(rows)
+    marks = [c for c in ("FCrDNS", "HELO") if c in df.columns]
+
+    def paint(d):
+        s = pd.DataFrame("", index=d.index, columns=d.columns)
+        for c in marks:
+            s[c] = d[c].map(lambda v: good if v == "✅" else badc)
+        s["IP"] = d["FCrDNS"].map(lambda v: "color:#34D399;font-weight:600" if v == "✅" else "color:#FB7185;font-weight:600")
+        return s
+
+    st.dataframe(df.style.apply(paint, axis=None), width="stretch", hide_index=True)
 
 
 def dns_auth():
