@@ -1,345 +1,418 @@
 import re
-import io
-import csv
-import base64
-import zlib
-import ipaddress
-import socket
-import urllib.error
-import urllib.request
-from functools import lru_cache
-from urllib.parse import urlparse
+import json
+import difflib
 import html as htmlmod
-from concurrent.futures import ThreadPoolExecutor
+from urllib.request import Request, urlopen
 
 import streamlit as st
-import dns.resolver
-import dns.reversename
+import streamlit.components.v1 as components
 
-R = dns.resolver.Resolver()
-R.timeout = 3
-R.lifetime = 5
-MAX_IPS = 1024
+import tools
+import style
+import db
 
+try:
+    from streamlit_ace import st_ace
+    HAS_ACE = True
+except ImportError:
+    HAS_ACE = False
 
-# ---------- DNS helpers ----------
-def q(name, rtype):
+st.set_page_config(page_title="HTML Online Viewer", page_icon="⚡", layout="wide",
+                   initial_sidebar_state="collapsed")
+style.apply()
+
+SAMPLE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sample</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f4f4;">
+<div style="display:none;max-height:0;overflow:hidden;">Preheader text goes here</div>
+<table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">
+<table width="600" cellpadding="20" cellspacing="0" style="background:#ffffff;font-family:Arial,sans-serif;">
+<tr><td>
+<h1>Hello {{name}}</h1>
+<p>This is a sample email. Your email is [email].</p>
+<img src="https://via.placeholder.com/560x120" alt="Banner" width="560">
+<p><a href="https://example.com/offer">View offer</a></p>
+</td></tr></table>
+</td></tr></table>
+</body>
+</html>"""
+
+ss = st.session_state
+ss.setdefault("html", SAMPLE)
+ss.setdefault("ver", 0)
+ss.setdefault("last_upload", None)
+ss.setdefault("tpls", {})
+if "h" in st.query_params and not ss.get("share_loaded"):
     try:
-        return [x.to_text() for x in R.resolve(name, rtype)]
+        ss.html = tools.decode_share(st.query_params["h"])
     except Exception:
-        return []
+        pass
+    ss.share_loaded = True
 
 
-def txt(name):
-    return [t.replace('" "', "").strip('"') for t in q(name, "TXT")]
+# ---------- helpers ----------
+def show_html(h, width, height):
+    if hasattr(st, "iframe"):
+        st.iframe(h, width=width or "stretch", height=height)
+    else:
+        components.html(h, width=width, height=height, scrolling=True)
 
 
-def ptr(ip):
-    try:
-        return [x.to_text().rstrip(".").lower() for x in R.resolve(dns.reversename.from_address(ip), "PTR")]
-    except Exception:
-        return []
+
+def parse_data(txt):
+    d = {}
+    for line in txt.splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            if k.strip():
+                d[k.strip()] = v.strip()
+    return d
 
 
-def expand(text):
-    """IPs, ranges (1.2.3.4-9) and CIDR -> list of IPv4 strings."""
-    ips, bad = [], []
-    for tok in re.split(r"[\s,;]+", text.strip()):
-        if not tok:
-            continue
-        try:
-            m = re.fullmatch(r"(\d+\.\d+\.\d+\.)(\d+)-(\d+)", tok)
-            if m:
-                a, b = int(m[2]), int(m[3])
-                ipaddress.IPv4Address(m[1] + str(a))
-                ipaddress.IPv4Address(m[1] + str(b))
-                ips += [m[1] + str(i) for i in range(a, b + 1)]
-            elif "/" in tok:
-                net = ipaddress.ip_network(tok, strict=False)
-                if net.version != 4 or net.num_addresses > MAX_IPS:
-                    raise ValueError
-                ips += [str(i) for i in (list(net.hosts()) or list(net))]
-            else:
-                ips.append(str(ipaddress.IPv4Address(tok)))
-        except ValueError:
-            bad.append(tok)
-    return list(dict.fromkeys(ips))[:MAX_IPS], bad
+def apply_merge(h, data):
+    for k, v in data.items():
+        k = re.escape(k)
+        pats = [
+            r"\{\{\s*" + k + r"\s*\}\}",
+            r"\[\s*" + k + r"\s*\]",
+            r"%%\s*" + k + r"\s*%%",
+            r"\$\{\s*" + k + r"\s*\}",
+        ]
+        for p in pats:
+            h = re.sub(p, lambda m: v, h)
+    return h
 
 
-def pairs(ips, domains, prefix, pattern, mode):
-    out, n = [], len(ips)
-    for i, ip in enumerate(ips):
-        d = domains[i % len(domains)] if mode == "Rotate" else domains[i * len(domains) // n]
-        a, b, c, e = ip.split(".")
-        host = pattern
-        for k, v in {"{ip}": ip.replace(".", "-"), "{last}": e, "{a}": a, "{b}": b, "{c}": c,
-                     "{d}": e, "{prefix}": prefix, "{domain}": d}.items():
-            host = host.replace(k, v)
-        out.append((ip, host.lower()))
+def images_off(h):
+    def repl(m):
+        alt = re.search(r"alt\s*=\s*[\"']([^\"']*)", m.group(0), re.I)
+        label = htmlmod.escape(alt.group(1)) if alt and alt.group(1) else "image blocked"
+        return ('<span style="display:inline-block;border:1px solid #ccc;padding:4px;'
+                'color:#666;font:12px sans-serif">' + label + "</span>")
+    return re.sub(r"<img\b[^>]*>", repl, h, flags=re.I | re.S)
+
+
+def dark_sim(h):
+    css = ("<style>html{filter:invert(1) hue-rotate(180deg);background:#fff}"
+           "img{filter:invert(1) hue-rotate(180deg)}</style>")
+    return css + h
+
+
+def to_text(h):
+    t = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", "", h)
+    t = re.sub(r"(?is)<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>", r"\2 (\1)", t)
+    t = re.sub(r"(?i)<br\s*/?>|</(p|div|tr|h[1-6]|li)>", "\n", t)
+    t = re.sub(r"<[^>]+>", "", t)
+    t = htmlmod.unescape(t)
+    t = re.sub(r"[ \t]+", " ", t)
+    return re.sub(r"\n\s*\n+", "\n\n", t).strip()
+
+
+def lint(raw, merged):
+    out = []
+    size = len(raw.encode("utf-8"))
+    if size > 102 * 1024:
+        out.append(("error", f"Size {size/1024:.1f} KB: Gmail clips above ~102 KB"))
+    else:
+        out.append(("ok", f"Size {size/1024:.1f} KB"))
+    if not re.search(r"<!doctype", raw, re.I):
+        out.append(("warn", "Missing DOCTYPE"))
+    if not re.search(r"<meta[^>]+viewport", raw, re.I):
+        out.append(("warn", "Missing viewport meta"))
+    if not re.search(r"<title", raw, re.I):
+        out.append(("warn", "Missing <title>"))
+    body = re.split(r"<body", raw, flags=re.I)[-1][:3000]
+    if not re.search(r"display\s*:\s*none|max-height\s*:\s*0", body, re.I):
+        out.append(("warn", "No hidden preheader found near top of body"))
+    imgs = re.findall(r"<img\b[^>]*>", raw, re.I | re.S)
+    no_alt = [i for i in imgs if not re.search(r"\balt\s*=", i, re.I)]
+    no_w = [i for i in imgs if not re.search(r"\bwidth\s*=", i, re.I)]
+    if no_alt:
+        out.append(("warn", f"{len(no_alt)} image(s) without alt"))
+    if no_w:
+        out.append(("warn", f"{len(no_w)} image(s) without width attribute"))
+    checks = {
+        r"display\s*:\s*(flex|grid)": "flex/grid (poor Outlook/Gmail support)",
+        r"position\s*:\s*(absolute|fixed)": "position absolute/fixed",
+        r"<script\b": "<script> (stripped by mail clients)",
+        r"<form\b": "<form> (limited support)",
+        r"<video\b|<audio\b": "video/audio tags",
+        r"@font-face": "@font-face (limited support)",
+        r"var\(|calc\(": "CSS var()/calc()",
+        r"background-image\s*:": "CSS background-image (Outlook ignores)",
+        r"<link[^>]+stylesheet": "external stylesheet",
+    }
+    for p, msg in checks.items():
+        if re.search(p, raw, re.I):
+            out.append(("warn", "Uses " + msg))
+    for h in re.findall(r"href\s*=\s*[\"']([^\"']*)[\"']", raw, re.I):
+        if h.strip() in ("", "#"):
+            out.append(("warn", "Empty or '#' link found"))
+            break
+    left = set(re.findall(r"\{\{[^}]+\}\}|%%[^%]+%%", merged))
+    if left:
+        out.append(("warn", "Unreplaced merge tags: " + ", ".join(sorted(left))))
     return out
 
 
-def render(pr, fmt):
-    if fmt.startswith("Plain"):
-        return "\n".join(f"{ip} {h}" for ip, h in pr)
-    if fmt == "A records":
-        return "\n".join(f"{h}. IN A {ip}" for ip, h in pr)
-    if fmt == "BIND PTR records":
-        return "\n".join(f"{dns.reversename.from_address(ip).to_text()} IN PTR {h}." for ip, h in pr)
-    if fmt == "CSV":
-        buf = io.StringIO()
-        w = csv.writer(buf)
-        w.writerow(["ip", "hostname"])
-        w.writerows(pr)
-        return buf.getvalue()
-    zones = {}
-    for ip, h in pr:
-        a, b, c, d = ip.split(".")
-        zones.setdefault(f"{c}.{b}.{a}.in-addr.arpa.", []).append(f"{d} IN PTR {h}.")
-    return "\n\n".join(f"$ORIGIN {z}\n" + "\n".join(r) for z, r in zones.items())
+def fetch_url(u):
+    req = Request(u, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=15) as r:
+        return r.read().decode("utf-8", errors="replace")
 
 
-def rdns_inputs(k):
-    ips_txt = st.text_area("IPs (one per line; ranges 1.2.3.4-9 and CIDR work)", height=160, key=k + "_ips")
-    c1, c2 = st.columns(2)
-    dom_txt = c1.text_input("Domain(s), comma separated", placeholder="steepbev.com", key=k + "_dom")
-    prefix = c2.text_input("Subdomain prefix", placeholder="info", key=k + "_pre")
-    with st.expander("Advanced"):
-        pattern = st.text_input("Hostname pattern", "{prefix}{last}.{domain}", key=k + "_pat",
-                                help="Placeholders: {prefix} {last} {a} {b} {c} {d} {ip} (dashed) {domain}")
-        mode = st.radio("Multiple domains", ["Rotate", "Split evenly"], horizontal=True, key=k + "_mode")
-    ips, bad = expand(ips_txt)
-    domains = [d.strip().lower().strip(".") for d in re.split(r"[\s,;]+", dom_txt) if d.strip()]
-    if bad:
-        st.warning("Skipped: " + ", ".join(bad))
-    return ips, domains, prefix.strip().lower(), pattern, mode
+def link_status(u):
+    try:
+        req = Request(u, method="HEAD", headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=10) as r:
+            return r.status
+    except Exception as e:
+        return str(getattr(e, "code", e))
 
 
-# ---------- tools ----------
-def rdns_generator():
-    st.title("rDNS Generator")
-    ips, domains, prefix, pattern, mode = rdns_inputs("g")
-    fmt = st.selectbox("Format", ["Plain (ip host)", "A records", "BIND PTR records", "BIND zone per /24", "CSV"])
-    if not (ips and domains):
-        st.info("Enter IPs and a domain")
-        return
-    out = render(pairs(ips, domains, prefix, pattern, mode), fmt)
-    st.code(out, language=None)
-    st.download_button("Download", out, "rdns.txt")
+# ---------- header + top nav ----------
+st.markdown(
+    '<div class="hero"><div class="logo">⚡</div><div><div class="brand">HTML Online Viewer</div>'
+    '<div class="tag">preview · email checks · deliverability tools</div></div></div>',
+    unsafe_allow_html=True)
+
+NAV = {
+    "🖥️ Viewer": None,
+    "🌐 rDNS Generator": tools.rdns_generator,
+    "🔍 FCrDNS Check": tools.rdns_checker,
+    "🛡️ SPF · DKIM · DMARC": tools.dns_auth,
+    "🚀 PowerMTA": tools.pmta,
+}
+with st.container(key="nav"):
+    tool = st.radio("Tool", list(NAV), horizontal=True, label_visibility="collapsed")
+if NAV[tool]:
+    NAV[tool]()
+    st.stop()
+
+# ---------- viewer ----------
+ss.setdefault("mode", "split")
+ss.setdefault("ui_dark", False)
+ss.setdefault("tree_open", True)
 
 
-def check_ip(ip, helo):
-    p = ptr(ip)
-    fwd = [a for h in p for a in q(h, "A")]
-    row = {"IP": ip, "PTR": ", ".join(p) or "-", "A (fwd)": ", ".join(dict.fromkeys(fwd)) or "-",
-           "FCrDNS": "✅" if ip in fwd else "❌"}
-    if helo:
-        row["HELO"] = "✅" if helo in p else "❌"
-    return row
+def set_mode(m):
+    ss.mode = m
 
 
-def rdns_checker():
-    st.title("rDNS / FCrDNS Checker")
-    with st.form("chk"):
-        ips_txt = st.text_area("IPs", height=160)
-        helo = st.text_input("HELO/EHLO hostname (optional, compared to PTR)")
-        go = st.form_submit_button("Check")
-    if not go:
-        return
-    ips, bad = expand(ips_txt)
-    if bad:
-        st.warning("Skipped: " + ", ".join(bad))
-    with ThreadPoolExecutor(20) as ex:
-        rows = list(ex.map(lambda i: check_ip(i, helo.strip().lower()), ips))
-    if not rows:
-        return
-    import pandas as pd
-    ok = sum(r["FCrDNS"] == "✅" for r in rows)
-    c1, c2 = st.columns(2)
-    c1.success(f"✅ {ok} pass")
-    c2.error(f"❌ {len(rows) - ok} fail") if len(rows) - ok else c2.success("❌ 0 fail")
-    good = "background-color:#06402B;color:#34D399;font-weight:700;text-align:center"
-    badc = "background-color:#4C0519;color:#FB7185;font-weight:700;text-align:center"
-    df = pd.DataFrame(rows)
-    marks = [c for c in ("FCrDNS", "HELO") if c in df.columns]
-
-    def paint(d):
-        s = pd.DataFrame("", index=d.index, columns=d.columns)
-        for c in marks:
-            s[c] = d[c].map(lambda v: good if v == "✅" else badc)
-        s["IP"] = d["FCrDNS"].map(lambda v: "color:#34D399;font-weight:600" if v == "✅" else "color:#FB7185;font-weight:600")
-        return s
-
-    st.dataframe(df.style.apply(paint, axis=None), width="stretch", hide_index=True)
+def tree_mode(o):
+    ss.mode, ss.tree_open = "highlight", o
 
 
-def dns_auth():
-    st.title("SPF / DKIM / DMARC")
-    with st.form("auth"):
-        dom_txt = st.text_input("Domain(s), comma separated")
-        sels = st.text_input("DKIM selectors", "default,selector1,selector2,google,k1,s1")
-        go = st.form_submit_button("Check")
-    if not go:
-        return
-    for d in [x.strip().lower() for x in dom_txt.split(",") if x.strip()]:
-        st.subheader(d)
-        spf = [t for t in txt(d) if t.lower().startswith("v=spf1")]
-        if not spf:
-            st.error("SPF: none found")
+def do_format():
+    ss.html = tools.beautify(ss.html)
+    ss.ver += 1
+
+
+def do_sample():
+    ss.html = SAMPLE
+    ss.ver += 1
+
+
+def do_clear():
+    ss.html = ""
+    ss.ver += 1
+
+
+def flip_dark():
+    ss.ui_dark = not ss.ui_dark
+
+
+rail_col, main_col = st.columns([1.25, 8])
+with main_col:
+    if ss.mode == "split":
+        ed_col, pv_col = st.columns(2)
+    else:
+        ed_col, pv_col = None, st.container()
+    chk = st.expander("Checks & tools")
+
+if ed_col is not None:
+    with ed_col:
+        if HAS_ACE:
+            new = st_ace(value=ss.html, language="html", theme="monokai" if ss.ui_dark else "chrome",
+                         height=760, wrap=True, auto_update=True, key=f"ace_{ss.ver}")
         else:
-            if len(spf) > 1:
-                st.error("SPF: multiple records (invalid)")
-            rec = spf[0]
-            st.code(rec, language=None)
-            toks = [t.lstrip("+-~?").lower() for t in rec.split()[1:]]
-            n = sum(t.startswith(("include:", "exists:", "redirect=", "ptr")) or t in ("a", "mx")
-                    or t.startswith(("a:", "a/", "mx:", "mx/")) for t in toks)
-            (st.error if n > 10 else st.success)(f"SPF top-level DNS lookups: {n}/10 (nested includes not counted)")
-            end = rec.split()[-1].lower()
-            if end in ("-all", "~all"):
-                st.success(f"SPF ends with {end}")
+            new = st.text_area("HTML", ss.html, height=760, key=f"ta_{ss.ver}")
+        if new is not None:
+            ss.html = new
+
+with rail_col, st.container(key="vrail"):
+    st.markdown('<div class="vtitle">HTML Online Viewer</div>', unsafe_allow_html=True)
+    if ss.mode != "split":
+        st.button("Back to editor", icon=":material/arrow_back:", on_click=set_mode, args=("split",), width="stretch")
+    st.button("Preview (Full page)", icon=":material/visibility:", on_click=set_mode, args=("preview",), width="stretch")
+    st.button("Highlight (Full page)", icon=":material/edit_note:", on_click=set_mode, args=("highlight",), width="stretch")
+    st.button("Format", icon=":material/format_align_left:", on_click=do_format, width="stretch")
+    st.button("Expand all", icon=":material/add_box:", on_click=tree_mode, args=(True,), width="stretch")
+    st.button("Collapse all", icon=":material/indeterminate_check_box:", on_click=tree_mode, args=(False,), width="stretch")
+    st.button("Sample", icon=":material/description:", on_click=do_sample, width="stretch")
+    st.button("Clear", icon=":material/draft:", on_click=do_clear, width="stretch")
+    with st.popover("Import from file", icon=":material/upload_file:", width="stretch"):
+        up = st.file_uploader("Upload HTML", type=["html", "htm", "txt"])
+        if up is not None:
+            uid = f"{up.name}-{up.size}"
+            if ss.last_upload != uid:
+                ss.html = up.getvalue().decode("utf-8", errors="replace")
+                ss.last_upload = uid
+                ss.ver += 1
+                st.rerun()
+        url = st.text_input("Load from URL")
+        if st.button("Fetch URL", width="stretch") and url:
+            try:
+                ss.html = fetch_url(url)
+                ss.ver += 1
+                st.rerun()
+            except Exception as e:
+                st.error(f"Fetch failed: {e}")
+        if st.button("Load sample", width="stretch"):
+            ss.html = SAMPLE
+            ss.ver += 1
+            st.rerun()
+    st.download_button("Export to file", ss.html, "page.html", "text/html", icon=":material/download:", width="stretch")
+    st.button("Dark mode", icon=":material/dark_mode:", on_click=flip_dark, width="stretch")
+    st.markdown('<div class="vsep"></div>', unsafe_allow_html=True)
+    with st.popover("Find & Replace", icon=":material/search:", width="stretch"):
+        f = st.text_input("Find", key="find")
+        r = st.text_input("Replace with", key="repl")
+        o1, o2 = st.columns(2)
+        use_re = o1.checkbox("Regex")
+        case = o2.checkbox("Case sensitive")
+        if f:
+            try:
+                pat = re.compile(f if use_re else re.escape(f), 0 if case else re.I)
+                n = len(pat.findall(ss.html))
+                st.caption(f"{n} match(es)")
+                if st.button("Replace all") and n:
+                    ss.html = pat.sub(r if use_re else (lambda m: r), ss.html)
+                    ss.ver += 1
+                    st.rerun()
+            except re.error as e:
+                st.error(f"Bad regex: {e}")
+    with st.popover("View options", icon=":material/tune:", width="stretch"):
+        device = st.radio("Device", ["Desktop", "Tablet (768)", "Mobile (375)", "Custom"])
+        custom_w = st.number_input("Custom width", 200, 1920, 600) if device == "Custom" else None
+        height = st.slider("Preview height", 300, 2000, 900, 50)
+        no_img = st.checkbox("Images off")
+        dark = st.checkbox("Dark mode (rough sim)")
+        http_imgs = st.checkbox("Load http:// images", True, help="Fetched through the server so they work on the https app")
+    with st.popover("Merge data", icon=":material/data_object:", width="stretch"):
+        merge_txt = st.text_area("key=value per line", "name=John\nemail=john@example.com", height=120)
+    with st.popover("Templates", icon=":material/save:", width="stretch"):
+        st.caption("☁️ Saved in Neon database" if db.enabled()
+                   else "Session only. Add NEON_DATABASE_URL to secrets to save permanently.")
+        try:
+            nm = st.text_input("Name", key="tpl_name")
+            if st.button("Save current") and nm.strip():
+                db.save(nm.strip(), ss.html)
+                st.toast("Template saved")
+            saved = db.names()
+            if saved:
+                pick = st.selectbox("Saved", saved)
+                if st.button("Load template"):
+                    ss.html = db.load(pick) or ""
+                    ss.ver += 1
+                    st.rerun()
+                if st.button("Delete template"):
+                    db.remove(pick)
+                    st.rerun()
+                st.download_button("Export all (JSON)", json.dumps(db.export_all()), "templates.json")
+            imp = st.file_uploader("Import JSON", type="json", key="tpl_imp")
+            if imp is not None and ss.get("tpl_imp_id") != f"{imp.name}-{imp.size}":
+                for k, v in json.loads(imp.getvalue()).items():
+                    db.save(k, v)
+                ss.tpl_imp_id = f"{imp.name}-{imp.size}"
+                st.rerun()
+        except Exception as e:
+            st.error(f"Template storage error: {e}")
+    with st.popover("Share link", icon=":material/share:", width="stretch"):
+        if st.button("Generate link"):
+            enc = tools.encode_share(ss.html)
+            if len(enc) > 7000:
+                st.error("Too large for a URL")
             else:
-                st.warning(f"SPF ends with '{end}' (expected -all or ~all)")
-        dm = [t for t in txt("_dmarc." + d) if t.upper().startswith("V=DMARC1")]
-        if not dm:
-            st.error("DMARC: none found")
+                st.query_params["h"] = enc
+                st.success("Copy the URL from the address bar")
+    with st.popover("Link tracking", icon=":material/link:", width="stretch"):
+        tp = st.text_input("Params", "utm_source=email&utm_medium=bulk&utm_campaign=test")
+        if st.button("Apply to all http(s) links"):
+            ss.html = tools.track_links(ss.html, tp)
+            ss.ver += 1
+            st.rerun()
+
+data = parse_data(merge_txt)
+merged = apply_merge(ss.html, data)
+shown = images_off(merged) if no_img else (tools.inline_http_images(merged) if http_imgs else merged)
+if dark:
+    shown = dark_sim(shown)
+width = {"Desktop": None, "Tablet (768)": 768, "Mobile (375)": 375}.get(device, custom_w)
+
+with pv_col:
+    if ss.mode == "highlight":
+        show_html(tools.highlight_tree(ss.html, ss.tree_open, ss.ui_dark), None, height)
+    else:
+        show_html(shown, width, height)
+
+with chk:
+    t_lint, t_links, t_text, t_spam, t_diff = st.tabs(["Lint", "Links", "Plain text", "Spam / ratio", "Diff"])
+
+    with t_lint:
+        for lvl, msg in lint(ss.html, merged):
+            {"ok": st.success, "warn": st.warning, "error": st.error}[lvl](msg)
+
+    with t_links:
+        links = re.findall(r"<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"']", merged, re.I)
+        if links:
+            rows = [{"url": u} for u in dict.fromkeys(links)]
+            if st.button("Check status"):
+                for row in rows:
+                    row["status"] = link_status(row["url"]) if row["url"].startswith("http") else "-"
+            st.dataframe(rows, width="stretch")
         else:
-            st.code(dm[0], language=None)
-            tags = dict(p.strip().split("=", 1) for p in dm[0].split(";") if "=" in p)
-            pol = tags.get("p", "").lower()
-            (st.warning if pol == "none" else st.success)(f"DMARC policy: p={pol or '?'}"
-                                                         + (" (monitoring only)" if pol == "none" else ""))
-            if "rua" not in tags:
-                st.warning("DMARC: no rua reporting address")
-        found = []
-        for s in [x.strip() for x in sels.split(",") if x.strip()]:
-            for t in txt(f"{s}._domainkey.{d}"):
-                m = re.search(r"p=([A-Za-z0-9+/=]+)", t)
-                found.append({"selector": s, "key": "present" if m else "revoked/empty", "record": t[:80] + "..."})
-        if found:
-            st.dataframe(found, width="stretch")
+            st.info("No links found")
+
+    with t_text:
+        st.text_area("Plain text version", to_text(merged), height=500)
+
+    with t_spam:
+        sp = tools.spam_report(merged)
+        m = st.columns(4)
+        m[0].metric("Text chars", sp["chars"])
+        m[1].metric("Images", sp["images"])
+        m[2].metric("Links", sp["links"])
+        m[3].metric("ALL-CAPS words", sp["caps"])
+        if sp["images"] and sp["chars"] < 200 * sp["images"]:
+            st.warning(f"Low text-to-image ratio: {sp['chars']} chars / {sp['images']} images (aim for 200+ per image)")
         else:
-            st.warning("DKIM: no record found for the given selectors")
+            st.success("Text-to-image ratio OK")
+        if sp["excl"] > 3:
+            st.warning(f"{sp['excl']} exclamation marks")
+        if sp["hits"]:
+            st.warning("Spam trigger words found")
+            st.dataframe([{"word": k, "count": v} for k, v in sp["hits"].items()])
+        else:
+            st.success("No spam trigger words found")
 
-
-def pmta():
-    st.title("PowerMTA Config")
-    ips, domains, prefix, pattern, mode = rdns_inputs("p")
-    c1, c2 = st.columns(2)
-    vp = c1.text_input("VMTA name prefix", "vmta-", key="p_vp")
-    pool = c2.text_input("Pool name", "pool1", key="p_pool")
-    extra = st.text_area("Extra directives per VMTA (optional)", placeholder="max-smtp-out 20", key="p_extra")
-    if not (ips and domains):
-        st.info("Enter IPs and a domain")
-        return
-    blocks, names = [], []
-    for ip, h in pairs(ips, domains, prefix, pattern, mode):
-        name = vp + ip.replace(".", "-")
-        names.append(name)
-        body = f"    smtp-source-host {ip} {h}\n" + "".join(
-            f"    {ln.strip()}\n" for ln in extra.splitlines() if ln.strip())
-        blocks.append(f"<virtual-mta {name}>\n{body}</virtual-mta>")
-    pool_blk = f"<virtual-mta-pool {pool}>\n" + "".join(f"    virtual-mta {n}\n" for n in names) + "</virtual-mta-pool>"
-    out = "\n\n".join(blocks) + "\n\n" + pool_blk
-    st.code(out, language=None)
-    st.download_button("Download", out, "pmta-vmtas.conf")
-
-
-# ---------- HTML viewer helpers ----------
-def encode_share(h):
-    return base64.urlsafe_b64encode(zlib.compress(h.encode(), 9)).decode()
-
-
-def decode_share(s):
-    return zlib.decompressobj().decompress(base64.urlsafe_b64decode(s.encode()), 2_000_000).decode()
-
-
-def track_links(h, params):
-    params = params.strip().lstrip("?&")
-    keys = {p.split("=")[0] for p in params.split("&") if p}
-
-    def f(m):
-        url = m.group(2)
-        if not re.match(r"https?://", url, re.I) or any(re.search(r"[?&]" + re.escape(k) + "=", url) for k in keys):
-            return m.group(0)
-        frag = ""
-        if "#" in url:
-            url, frag = url.split("#", 1)
-            frag = "#" + frag
-        return m.group(1) + url + ("&" if "?" in url else "?") + params + frag + m.group(3)
-
-    return re.sub(r"(<a\b[^>]*?href\s*=\s*[\"'])([^\"']+)([\"'])", f, h, flags=re.I)
-
-
-SPAM = ["free", "winner", "congratulations", "act now", "limited time", "urgent", "click here", "buy now",
-        "guarantee", "no obligation", "risk free", "cash", "earn money", "make money", "credit", "loan",
-        "casino", "lottery", "prize", "order now", "double your", "dear friend", "cheap", "discount",
-        "save big", "apply now", "once in a lifetime", "no cost", "bonus", "offer expires"]
-
-
-def spam_report(h):
-    t = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", "", h)
-    t = htmlmod.unescape(re.sub(r"<[^>]+>", " ", t))
-    t = re.sub(r"\s+", " ", t).strip()
-    low = t.lower()
-    hits = {w: len(re.findall(r"\b" + re.escape(w) + r"\b", low)) for w in SPAM}
-    return {"hits": {k: v for k, v in hits.items() if v}, "chars": len(t),
-            "images": len(re.findall(r"<img\b", h, re.I)),
-            "links": len(re.findall(r"<a\b[^>]*href", h, re.I)),
-            "caps": len(re.findall(r"\b[A-Z]{4,}\b", t)), "excl": t.count("!")}
-
-
-# ---------- http:// image loading for the preview ----------
-def _public(host):
-    try:
-        return bool(host) and all(
-            not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
-            for ip in (ipaddress.ip_address(i[4][0]) for i in socket.getaddrinfo(host, None)))
-    except Exception:
-        return False
-
-
-class _Redir(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not _public(urlparse(newurl).hostname):
-            raise urllib.error.URLError("blocked redirect")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-@lru_cache(maxsize=256)
-def fetch_img(url):
-    """Download an image server-side and return a data: URI (None if blocked/failed)."""
-    try:
-        if not _public(urlparse(url).hostname):
-            return None
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.build_opener(_Redir).open(req, timeout=8) as r:
-            ctype = r.headers.get_content_type()
-            data = r.read(3_000_001)
-        if not ctype.startswith("image/") or len(data) > 3_000_000:
-            return None
-        return f"data:{ctype};base64,{base64.b64encode(data).decode()}"
-    except Exception:
-        return None
-
-
-_IMG_PATS = [re.compile(r"(\b(?:src|background|poster)\s*=\s*[\"'])(http://[^\"']+)([\"'])", re.I),
-             re.compile(r"(url\(\s*[\"']?)(http://[^\"')\s]+)([\"']?\s*\))", re.I)]
-
-
-def inline_http_images(h):
-    """Mixed-content fix: the app is https, so http:// images are blocked by the browser.
-    Fetch them server-side and embed as data URIs (fallback: upgrade the URL to https)."""
-    urls = list(dict.fromkeys(m.group(2) for p in _IMG_PATS for m in p.finditer(h)))[:40]
-    if not urls:
-        return h
-    with ThreadPoolExecutor(8) as ex:
-        got = dict(zip(urls, ex.map(fetch_img, urls)))
-
-    def sub(m):
-        d = got.get(m.group(2))
-        return m.group(1) + (d or "https://" + m.group(2)[7:]) + m.group(3)
-
-    for p in _IMG_PATS:
-        h = p.sub(sub, h)
-    return h
+    with t_diff:
+        if st.button("Save current as baseline"):
+            ss.base = ss.html
+        try:
+            tpl_names = db.names()
+        except Exception:
+            tpl_names = []
+        src = st.selectbox("Compare against", ["Baseline snapshot", *tpl_names])
+        base = ss.get("base") if src == "Baseline snapshot" else db.load(src)
+        if base is None:
+            st.info("Save a baseline first")
+        else:
+            page = difflib.HtmlDiff(wrapcolumn=60).make_file(
+                base.splitlines(), ss.html.splitlines(), "Baseline", "Current", context=True, numlines=2)
+            show_html(page, None, 600)
