@@ -64,6 +64,13 @@ def show_html(h, width, height):
 
 
 
+def light(h):
+    """Preview renders like a normal browser tab: white canvas, dark default text."""
+    tag = '<meta name="color-scheme" content="light"><style>:root{color-scheme:light}</style>'
+    m = re.match(r"\s*<!doctype[^>]*>", h, re.I)
+    return h[:m.end()] + tag + h[m.end():] if m else tag + h
+
+
 def parse_data(txt):
     d = {}
     for line in txt.splitlines():
@@ -359,7 +366,7 @@ with pv_col:
     if ss.mode == "highlight":
         show_html(tools.highlight_tree(ss.html, ss.tree_open, ss.ui_dark), None, height)
     else:
-        show_html(shown, width, height)
+        show_html(light(shown), width, height)
 
 with chk:
     t_lint, t_links, t_text, t_spam, t_diff = st.tabs(["Lint", "Links", "Plain text", "Spam / ratio", "Diff"])
