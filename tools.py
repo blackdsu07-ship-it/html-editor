@@ -4,6 +4,11 @@ import csv
 import base64
 import zlib
 import ipaddress
+import socket
+import urllib.error
+import urllib.request
+from functools import lru_cache
+from urllib.parse import urlparse
 import html as htmlmod
 from concurrent.futures import ThreadPoolExecutor
 
@@ -282,3 +287,59 @@ def spam_report(h):
             "images": len(re.findall(r"<img\b", h, re.I)),
             "links": len(re.findall(r"<a\b[^>]*href", h, re.I)),
             "caps": len(re.findall(r"\b[A-Z]{4,}\b", t)), "excl": t.count("!")}
+
+
+# ---------- http:// image loading for the preview ----------
+def _public(host):
+    try:
+        return bool(host) and all(
+            not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
+            for ip in (ipaddress.ip_address(i[4][0]) for i in socket.getaddrinfo(host, None)))
+    except Exception:
+        return False
+
+
+class _Redir(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _public(urlparse(newurl).hostname):
+            raise urllib.error.URLError("blocked redirect")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+@lru_cache(maxsize=256)
+def fetch_img(url):
+    """Download an image server-side and return a data: URI (None if blocked/failed)."""
+    try:
+        if not _public(urlparse(url).hostname):
+            return None
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.build_opener(_Redir).open(req, timeout=8) as r:
+            ctype = r.headers.get_content_type()
+            data = r.read(3_000_001)
+        if not ctype.startswith("image/") or len(data) > 3_000_000:
+            return None
+        return f"data:{ctype};base64,{base64.b64encode(data).decode()}"
+    except Exception:
+        return None
+
+
+_IMG_PATS = [re.compile(r"(\b(?:src|background|poster)\s*=\s*[\"'])(http://[^\"']+)([\"'])", re.I),
+             re.compile(r"(url\(\s*[\"']?)(http://[^\"')\s]+)([\"']?\s*\))", re.I)]
+
+
+def inline_http_images(h):
+    """Mixed-content fix: the app is https, so http:// images are blocked by the browser.
+    Fetch them server-side and embed as data URIs (fallback: upgrade the URL to https)."""
+    urls = list(dict.fromkeys(m.group(2) for p in _IMG_PATS for m in p.finditer(h)))[:40]
+    if not urls:
+        return h
+    with ThreadPoolExecutor(8) as ex:
+        got = dict(zip(urls, ex.map(fetch_img, urls)))
+
+    def sub(m):
+        d = got.get(m.group(2))
+        return m.group(1) + (d or "https://" + m.group(2)[7:]) + m.group(3)
+
+    for p in _IMG_PATS:
+        h = p.sub(sub, h)
+    return h
