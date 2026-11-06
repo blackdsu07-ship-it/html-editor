@@ -60,7 +60,7 @@ button[data-baseweb="tab"][aria-selected="true"]{color:#22D3EE}
 [data-testid="stAlert"]{border-radius:12px}
 [data-testid="stCode"] pre{border-radius:12px;border:1px solid #ffffff14}
 [data-testid="stDataFrame"]{border-radius:12px;overflow:hidden;border:1px solid #ffffff1f}
-iframe{border-radius:12px;border:1px solid #ffffff1f}
+iframe{border-radius:12px;border:1px solid #ffffff1f;background:#fff}
 ::-webkit-scrollbar{width:10px;height:10px}
 ::-webkit-scrollbar-thumb{background:linear-gradient(#8B5CF6,#EC4899);border-radius:8px}
 
