@@ -194,11 +194,69 @@ if NAV[tool]:
     NAV[tool]()
     st.stop()
 
-# ---------- toolbar ----------
-with st.container(key="toolbar"):
-    tb = st.columns([1, 1, 1, 1.2, 1, 3])
+# ---------- viewer ----------
+ss.setdefault("mode", "split")
+ss.setdefault("ui_dark", False)
+ss.setdefault("tree_open", True)
 
-    with tb[0].popover("📂 Load", width="stretch"):
+
+def set_mode(m):
+    ss.mode = m
+
+
+def tree_mode(o):
+    ss.mode, ss.tree_open = "highlight", o
+
+
+def do_format():
+    ss.html = tools.beautify(ss.html)
+    ss.ver += 1
+
+
+def do_sample():
+    ss.html = SAMPLE
+    ss.ver += 1
+
+
+def do_clear():
+    ss.html = ""
+    ss.ver += 1
+
+
+def flip_dark():
+    ss.ui_dark = not ss.ui_dark
+
+
+rail_col, main_col = st.columns([1.25, 8])
+with main_col:
+    if ss.mode == "split":
+        ed_col, pv_col = st.columns(2)
+    else:
+        ed_col, pv_col = None, st.container()
+    chk = st.expander("Checks & tools")
+
+if ed_col is not None:
+    with ed_col:
+        if HAS_ACE:
+            new = st_ace(value=ss.html, language="html", theme="monokai" if ss.ui_dark else "chrome",
+                         height=760, wrap=True, auto_update=True, key=f"ace_{ss.ver}")
+        else:
+            new = st.text_area("HTML", ss.html, height=760, key=f"ta_{ss.ver}")
+        if new is not None:
+            ss.html = new
+
+with rail_col, st.container(key="vrail"):
+    st.markdown('<div class="vtitle">HTML Online Viewer</div>', unsafe_allow_html=True)
+    if ss.mode != "split":
+        st.button("Back to editor", icon=":material/arrow_back:", on_click=set_mode, args=("split",), width="stretch")
+    st.button("Preview (Full page)", icon=":material/visibility:", on_click=set_mode, args=("preview",), width="stretch")
+    st.button("Highlight (Full page)", icon=":material/edit_note:", on_click=set_mode, args=("highlight",), width="stretch")
+    st.button("Format", icon=":material/format_align_left:", on_click=do_format, width="stretch")
+    st.button("Expand all", icon=":material/add_box:", on_click=tree_mode, args=(True,), width="stretch")
+    st.button("Collapse all", icon=":material/indeterminate_check_box:", on_click=tree_mode, args=(False,), width="stretch")
+    st.button("Sample", icon=":material/description:", on_click=do_sample, width="stretch")
+    st.button("Clear", icon=":material/draft:", on_click=do_clear, width="stretch")
+    with st.popover("Import from file", icon=":material/upload_file:", width="stretch"):
         up = st.file_uploader("Upload HTML", type=["html", "htm", "txt"])
         if up is not None:
             uid = f"{up.name}-{up.size}"
@@ -219,19 +277,36 @@ with st.container(key="toolbar"):
             ss.html = SAMPLE
             ss.ver += 1
             st.rerun()
-
-    with tb[1].popover("📱 View", width="stretch"):
+    st.download_button("Export to file", ss.html, "page.html", "text/html", icon=":material/download:", width="stretch")
+    st.button("Dark mode", icon=":material/dark_mode:", on_click=flip_dark, width="stretch")
+    st.markdown('<div class="vsep"></div>', unsafe_allow_html=True)
+    with st.popover("Find & Replace", icon=":material/search:", width="stretch"):
+        f = st.text_input("Find", key="find")
+        r = st.text_input("Replace with", key="repl")
+        o1, o2 = st.columns(2)
+        use_re = o1.checkbox("Regex")
+        case = o2.checkbox("Case sensitive")
+        if f:
+            try:
+                pat = re.compile(f if use_re else re.escape(f), 0 if case else re.I)
+                n = len(pat.findall(ss.html))
+                st.caption(f"{n} match(es)")
+                if st.button("Replace all") and n:
+                    ss.html = pat.sub(r if use_re else (lambda m: r), ss.html)
+                    ss.ver += 1
+                    st.rerun()
+            except re.error as e:
+                st.error(f"Bad regex: {e}")
+    with st.popover("View options", icon=":material/tune:", width="stretch"):
         device = st.radio("Device", ["Desktop", "Tablet (768)", "Mobile (375)", "Custom"])
         custom_w = st.number_input("Custom width", 200, 1920, 600) if device == "Custom" else None
         height = st.slider("Preview height", 300, 2000, 900, 50)
         no_img = st.checkbox("Images off")
         dark = st.checkbox("Dark mode (rough sim)")
         http_imgs = st.checkbox("Load http:// images", True, help="Fetched through the server so they work on the https app")
-
-    with tb[2].popover("🧩 Merge", width="stretch"):
+    with st.popover("Merge data", icon=":material/data_object:", width="stretch"):
         merge_txt = st.text_area("key=value per line", "name=John\nemail=john@example.com", height=120)
-
-    with tb[3].popover("💾 Templates", width="stretch"):
+    with st.popover("Templates", icon=":material/save:", width="stretch"):
         st.caption("☁️ Saved in Neon database" if db.enabled()
                    else "Session only. Add NEON_DATABASE_URL to secrets to save permanently.")
         try:
@@ -258,8 +333,7 @@ with st.container(key="toolbar"):
                 st.rerun()
         except Exception as e:
             st.error(f"Template storage error: {e}")
-
-    with tb[4].popover("🔗 Share", width="stretch"):
+    with st.popover("Share link", icon=":material/share:", width="stretch"):
         if st.button("Generate link"):
             enc = tools.encode_share(ss.html)
             if len(enc) > 7000:
@@ -267,70 +341,28 @@ with st.container(key="toolbar"):
             else:
                 st.query_params["h"] = enc
                 st.success("Copy the URL from the address bar")
-
-    layout = tb[5].radio("Layout", ["Split", "Wide preview", "Preview only"], index=1,
-                         horizontal=True, label_visibility="collapsed")
-
-# ---------- main ----------
-left, right = st.columns({"Split": [1, 1], "Wide preview": [2, 3], "Preview only": [0.02, 1]}[layout])
-if layout == "Preview only":
-    st.markdown("<style>.st-key-panel_l{display:none}</style>", unsafe_allow_html=True)
-
-with left, st.container(key="panel_l"):
-    st.subheader("Editor")
-    with st.expander("Find & Replace"):
-        f = st.text_input("Find", key="find")
-        r = st.text_input("Replace with", key="repl")
-        o1, o2 = st.columns(2)
-        use_re = o1.checkbox("Regex")
-        case = o2.checkbox("Case sensitive")
-        if f:
-            try:
-                pat = re.compile(f if use_re else re.escape(f), 0 if case else re.I)
-                n = len(pat.findall(ss.html))
-                st.caption(f"{n} match(es)")
-                if st.button("Replace all") and n:
-                    ss.html = pat.sub(r if use_re else (lambda m: r), ss.html)
-                    ss.ver += 1
-                    st.rerun()
-            except re.error as e:
-                st.error(f"Bad regex: {e}")
-
-    with st.expander("Add tracking params to links"):
+    with st.popover("Link tracking", icon=":material/link:", width="stretch"):
         tp = st.text_input("Params", "utm_source=email&utm_medium=bulk&utm_campaign=test")
         if st.button("Apply to all http(s) links"):
             ss.html = tools.track_links(ss.html, tp)
             ss.ver += 1
             st.rerun()
 
-    if HAS_ACE:
-        new = st_ace(value=ss.html, language="html", theme="monokai", height=650,
-                     wrap=True, auto_update=True, key=f"ace_{ss.ver}")
-    else:
-        new = st.text_area("HTML", ss.html, height=650, key=f"ta_{ss.ver}")
-    if new is not None:
-        ss.html = new
-
-    d1, d2 = st.columns(2)
-    d1.download_button("Download .html", ss.html, "page.html", "text/html", width="stretch")
-    if d2.button("Clear", width="stretch"):
-        ss.html = ""
-        ss.ver += 1
-        st.rerun()
-
 data = parse_data(merge_txt)
 merged = apply_merge(ss.html, data)
 shown = images_off(merged) if no_img else (tools.inline_http_images(merged) if http_imgs else merged)
 if dark:
     shown = dark_sim(shown)
+width = {"Desktop": None, "Tablet (768)": 768, "Mobile (375)": 375}.get(device, custom_w)
 
-with right, st.container(key="panel_r"):
-    t_prev, t_lint, t_links, t_text, t_spam, t_diff = st.tabs(
-        ["Preview", "Lint", "Links", "Plain text", "Spam / ratio", "Diff"])
-
-    with t_prev:
-        width = {"Desktop": None, "Tablet (768)": 768, "Mobile (375)": 375}.get(device, custom_w)
+with pv_col:
+    if ss.mode == "highlight":
+        show_html(tools.highlight_tree(ss.html, ss.tree_open, ss.ui_dark), None, height)
+    else:
         show_html(shown, width, height)
+
+with chk:
+    t_lint, t_links, t_text, t_spam, t_diff = st.tabs(["Lint", "Links", "Plain text", "Spam / ratio", "Diff"])
 
     with t_lint:
         for lvl, msg in lint(ss.html, merged):
