@@ -1,3 +1,4 @@
 streamlit
 streamlit-ace
 dnspython
+psycopg2-binary
