@@ -68,12 +68,10 @@ iframe{border-radius:12px;border:1px solid #ffffff1f}
 .st-key-vrail{background:#2b2b2b;border-radius:10px;padding:12px 10px;gap:.45rem}
 .vtitle{color:#ececec;text-align:center;font-size:15px;padding:6px 0 4px}
 .vsep{height:10px}
-.st-key-vrail .stButton>button,.st-key-vrail .stDownloadButton>button,.st-key-vrail [data-testid="stPopover"]>button{
-  background:#e9e9e9;color:#1d1d1d;border:1px solid #9a9a9a;border-radius:4px;font-weight:500;
-  justify-content:flex-start;box-shadow:none;transform:none}
-.st-key-vrail .stButton>button:hover,.st-key-vrail .stDownloadButton>button:hover,.st-key-vrail [data-testid="stPopover"]>button:hover{
-  background:#fff;color:#000;box-shadow:none;transform:none;border-color:#fff}
-.st-key-vrail button p{color:#1d1d1d}
+.st-key-vrail button{background:#e9e9e9!important;color:#1d1d1d!important;border:1px solid #9a9a9a!important;
+  border-radius:4px!important;font-weight:500;justify-content:flex-start;box-shadow:none!important;transform:none!important}
+.st-key-vrail button:hover{background:#fff!important;color:#000!important;border-color:#fff!important}
+.st-key-vrail button *{color:#1d1d1d!important;fill:#1d1d1d!important}
 </style>
 """
 
